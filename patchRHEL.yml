@@ -1,73 +1,34 @@
 ---
-- name: Patching RHEL/derivados usando dnf con modos parametrizables
+- name: Actualizar paquetes en RHEL 9
   hosts: all
   become: yes
-  become_user: manager
 
   vars:
-    # Modo de parchado (puedes sobreescribir con -e o con Survey en AWX)
-    # Valores válidos:
-    #   full              -> todas las actualizaciones
-    #   security          -> solo seguridad
-    #   bugfix            -> solo correcciones de bugs
-    #   security_bugfix   -> seguridad + bugfix
+    # Modo de parchado:
+    #   security        -> solo parches de seguridad (RHSA)
+    #   bugfix          -> solo correcciones de errores (RHBA)
+    #   security_bugfix -> seguridad + bugfix
+    #   full            -> todas las actualizaciones
+    #   simulate        -> solo simulación (no aplica cambios)
     patch_mode: "security"
 
-    # ¿Actualizar metadata de dnf antes?
-    dnf_update_cache: true
-
-    # ¿Solo actualizar paquetes ya instalados (no instalar nuevos)?
-    dnf_update_only: true
-
   tasks:
-    - name: Validar valor de patch_mode
-      ansible.builtin.assert:
-        that:
-          - patch_mode in ['full', 'security', 'bugfix', 'security_bugfix']
-        fail_msg: >-
-          patch_mode debe ser uno de: full, security, bugfix, security_bugfix.
-          Valor recibido: {{ patch_mode }}
-
-    - name: Mostrar modo de parchado seleccionado
-      ansible.builtin.debug:
-        msg: "Modo de parchado: {{ patch_mode }}"
-
-    - name: Actualizar metadata de dnf (equivalente a 'dnf makecache')
-      ansible.builtin.dnf:
-        update_cache: yes
-        name: "*"
-        state: present
-      when: dnf_update_cache
-
-    - name: Calcular flags de dnf según patch_mode
-      ansible.builtin.set_fact:
-        dnf_security: "{{ patch_mode in ['security', 'security_bugfix'] }}"
-        dnf_bugfix:   "{{ patch_mode in ['bugfix',   'security_bugfix'] }}"
-
-    - name: Aplicar parches con dnf según patch_mode
-      ansible.builtin.dnf:
-        name: "*"
-        state: latest
-        update_only: "{{ dnf_update_only }}"
-        security: "{{ dnf_security }}"
-        bugfix: "{{ dnf_bugfix }}"
-      register: dnf_result
-
-    - name: Mostrar resumen de paquetes cambiados (opcional)
-      ansible.builtin.debug:
-        var: dnf_result
-      when: dnf_result is defined
-
-    # OPCIONAL: reinicio si es necesario (usando dnf/needs-restarting)
-    - name: Comprobar si se requiere reinicio (kernel u otros)
-      ansible.builtin.command: dnf needs-restarting -r
-      register: reboot_check
-      failed_when: false
-      changed_when: false
-
-    - name: Reiniciar si dnf indica que es necesario
-      ansible.builtin.reboot:
-        msg: "Reinicio automático tras aplicar parches ({{ patch_mode }})"
-        reboot_timeout: 900
-      when: reboot_check.rc == 1
-
+    - name: Ejecutar actualización del sistema según modo
+      ansible.builtin.shell: |
+        {% if patch_mode == "simulate" %}
+        dnf update -y --setopt=tsflags=test --refresh
+        {% elif patch_mode == "security" %}
+        dnf update -y --security --refresh
+        {% elif patch_mode == "bugfix" %}
+        dnf update -y --bugfix --refresh
+        {% elif patch_mode == "security_bugfix" %}
+        dnf update -y --security --bugfix --refresh
+        {% elif patch_mode == "full" %}
+        dnf update -y --refresh
+        {% else %}
+        echo "⚠️  patch_mode inválido: {{ patch_mode }}" && exit 1
+        {% endif %}
+      environment:
+        LANG: en_US.UTF-8
+        LC_ALL: en_US.UTF-8
+        PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
