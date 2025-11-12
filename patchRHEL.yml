@@ -2,6 +2,7 @@
 - name: Patching RHEL/derivados usando dnf con modos parametrizables
   hosts: all
   become: yes
+  become_user: manager
 
   vars:
     # Modo de parchado (puedes sobreescribir con -e o con Survey en AWX)
