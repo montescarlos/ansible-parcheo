@@ -1,0 +1,40 @@
+- name: Windows Update (simular/descargar/instalar)
+  hosts: all
+  gather_facts: no
+
+  vars:
+    # simulate | download | install
+    patch_mode: simulate
+    categories:
+      - SecurityUpdates
+      - CriticalUpdates
+
+  tasks:
+    - name: Mapear modo -> estado de win_updates
+      ansible.builtin.set_fact:
+        wu_state: >-
+          {{ 'searched' if patch_mode == 'simulate'
+             else 'downloaded' if patch_mode == 'download'
+             else 'installed' }}
+
+    - name: Ejecutar Windows Update en modo {{ wu_state }}
+      ansible.windows.win_updates:
+        state: "{{ wu_state }}"
+        category_names: "{{ categories }}"
+        log_path: C:\Windows\Temp\ansible-win-updates.log
+      register: wu
+
+    - name: Resumen
+      ansible.builtin.debug:
+        msg:
+          - "Encontradas: {{ (wu.updates | default([])) | length }}"
+          - "Instaladas: {{ wu.installed_update_count | default(0) }}"
+          - "Descargadas: {{ wu.downloaded_update_count | default(0) }}"
+          - "Requiere reinicio: {{ wu.reboot_required | default(false) }}"
+
+    - name: Reiniciar si es necesario (solo en install)
+      ansible.windows.win_reboot:
+      when:
+        - patch_mode == 'install'
+        - wu.reboot_required | default(false)
+
