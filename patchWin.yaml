@@ -1,77 +1,14 @@
 ---
-- name: Windows Update robusto (AWX)
+- name: Parchar Windows con Windows Update
   hosts: windows
   gather_facts: no
 
-  vars:
-    # Modo: simulate | downloaded | installed
-    mode: "installed"
-    # Si usas WSUS y quieres forzar Microsoft Update, pon "windows_update"
-    server_selection: "windows_update"   # o "managed_server" si dejas WSUS
-    log_path: 'C:\ansible\win_updates.log'
-
   tasks:
-    - name: Mapear modo -> state
-    - ansible.builtin.set_fact:
-        wu_state: "{{ 'searched' if mode=='simulate'
-                      else 'downloaded' if mode=='downloaded'
-                      else 'installed' }}"
-
-    - name: Crear carpeta de logs
-      ansible.windows.win_file:
-        path: "{{ log_path | dirname }}"
-        state: directory
-
-    - name: Ejecutar Windows Update (pase 1)
+    - name: Instalar Actualizaciones Críticas y de Seguridad 
       ansible.windows.win_updates:
-        state: "{{ wu_state }}"
         category_names:
-          - Security Updates
-          - Critical Updates
-          - Update Rollups
-          - Definition Updates
-          - Servicing Stack Updates
-        server_selection: "{{ server_selection }}"
-        use_scheduled_task: yes
-        scheduled_task_name: Ansible-WindowsUpdate
-        log_path: "{{ log_path }}"
-        reboot: yes            # permite que el módulo pida reinicio
-      register: wu1
-
-    - name: Reiniciar si quedó pendiente tras el módulo
-      ansible.windows.win_reboot:
-        reboot_timeout: 3600
-      when: wu1.reboot_required | default(false)
-
-    - name: Reintentar hasta no tener updates ni reboot requeridos
-      ansible.windows.win_updates:
+          - CriticalUpdates
+          - SecurityUpdates
+          - UpdateRollups
         state: installed
-        category_names:
-          - Security Updates
-          - Critical Updates
-          - Update Rollups
-          - Definition Updates
-          - Servicing Stack Updates
-        server_selection: "{{ server_selection }}"
-        use_scheduled_task: yes
-        scheduled_task_name: Ansible-WindowsUpdate
-        log_path: "{{ log_path }}"
         reboot: yes
-      register: wu_loop
-      until: (wu_loop.found_update_count | int) == 0
-             and (wu_loop.failed_update_count | int) == 0
-             and not (wu_loop.reboot_required | default(false))
-      retries: 3
-      delay: 120
-
-    - name: Reinicio final si aún se requiere
-      ansible.windows.win_reboot:
-        reboot_timeout: 3600
-      when: wu_loop.reboot_required | default(false)
-
-    - name: Mostrar resumen
-      ansible.builtin.debug:
-        msg:
-          - "Instalados: {{ wu_loop.installed_update_count | default(0) }}"
-          - "Fallidos:   {{ wu_loop.failed_update_count | default(0) }}"
-          - "Log: {{ log_path }}"
