@@ -12,3 +12,4 @@
           - UpdateRollups
         state: installed
         reboot: yes
+        log_path: "C:\\Windows\\Temp\\ansible-winupdates.log"
