@@ -14,7 +14,7 @@
       ansible.windows.win_updates:
         category_names: "{{ categories }}"
         state: installed
-        reboot: yes                   # el módulo reinicia si hace falta
+        reboot: no                   # el módulo reinicia si hace falta
         reboot_timeout: 3600          # tiempo suficiente para volver
         log_path: "C:\\Windows\\Temp\\ansible-winupdates.log"
       register: wu
