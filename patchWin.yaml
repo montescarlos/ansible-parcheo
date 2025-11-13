@@ -1,6 +1,6 @@
 ---
 - name: Parchar Windows con Windows Update
-  hosts: windows
+  hosts: all
   gather_facts: no
 
   tasks:
