@@ -1,33 +1,66 @@
 ---
-- name: Parchar Windows con Windows Update (robusto)
+- name: Parchar Windows con manejo de SSU y exclusiones
   hosts: all
   gather_facts: no
 
   vars:
-    categories:
-      - CriticalUpdates
-      - SecurityUpdates
-      - UpdateRollups
+    log_path: "C:\\Windows\\Temp\\ansible-winupdates.log"
+    # Si descubrimos un KB problemático, agrégalo aquí o como extra var en AWX
+    reject_kbs: []   # ejemplo: ["KB5036893","KB5034763"]
 
   tasks:
-    - name: Aplicar actualizaciones hasta agotar pendientes
+    - name: Buscar actualizaciones disponibles (solo inventario)
       ansible.windows.win_updates:
-        category_names: "{{ categories }}"
-        state: installed
-        reboot: no                   # el módulo reinicia si hace falta
-        reboot_timeout: 3600          # tiempo suficiente para volver
-        log_path: "C:\\Windows\\Temp\\ansible-winupdates.log"
-      register: wu
-      # repetir “pasadas” hasta que no haya nada por instalar
-      until: wu.installed_update_count | default(0) == 0
-      retries: 4
-      delay: 60
+        state: searched
+      register: search_all
 
-    # Espera defensiva a que WinRM quede estable tras el último reboot
-    - name: Esperar WinRM arriba
+    - name: Mostrar lista encontrada (KBs/títulos)
+      ansible.builtin.debug:
+        msg: "{{ search_all.updates | map(attribute='kb') | list }} :: {{ search_all.updates | map(attribute='title') | list }}"
+
+    # 1) SSU primero
+    - name: Instalar únicamente Servicing Stack Updates
+      ansible.windows.win_updates:
+        category_names: ['ServicingStackUpdates']
+        state: installed
+        reboot: yes
+        reboot_timeout: 3600
+        log_path: "{{ log_path }}"
+      register: ssu_result
+
+    - name: Esperar WinRM estable tras SSU
       ansible.builtin.wait_for_connection:
         delay: 15
-        timeout: 0
+        timeout: 1200
 
-    - name: Comprobación final
-      ansible.windows.win_ping:
+    # 2) Resto de categorías en una o más pasadas
+    - name: Instalar críticas/seguridad/rollups (en olas)
+      ansible.windows.win_updates:
+        category_names:
+          - CriticalUpdates
+          - SecurityUpdates
+          - UpdateRollups
+        state: installed
+        reboot: yes
+        reboot_timeout: 3600
+        log_path: "{{ log_path }}"
+        reject_list: "{{ reject_kbs }}"
+      register: wu
+      until: wu.failed_update_count|default(0) == 0
+      retries: 2
+      delay: 60
+
+    - name: Esperar WinRM estable tras la última pasada
+      ansible.builtin.wait_for_connection:
+        delay: 15
+        timeout: 600
+
+    # 3) Si todavía hay fallos, reporta claramente cuáles
+    - name: Reportar KBs fallidos (si los hay)
+      ansible.builtin.fail:
+        msg: >-
+          Fallaron KBs: {{ wu.updates | selectattr('result','equalto','Failed') |
+                           map(attribute='kb') | list }}.
+          Agrégalos a 'reject_kbs' para excluirlos temporalmente y vuelve a ejecutar.
+          Revisa el log en {{ log_path }}.
+      when: wu.failed_update_count|default(0) > 0
