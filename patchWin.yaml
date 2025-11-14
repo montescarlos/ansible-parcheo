@@ -14,9 +14,30 @@
         state: searched
       register: search_all
 
-    - name: Mostrar lista encontrada (KBs/títulos)
+    - name: Mostrar lista encontrada (KBs/títulos) sin romper si no hay nada
       ansible.builtin.debug:
-        msg: "{{ search_all.updates | map(attribute='kb') | list }} :: {{ search_all.updates | map(attribute='title') | list }}"
+        msg:
+          kbs: >-
+            {{
+              (
+                (search_all.updates | default([]))
+                +
+                (search_all.filtered_updates | default({}) | dict2items | map(attribute='value') | list)
+              )
+              | map(attribute='kb') | map('first') | list
+            }}
+          titles: >-
+            {{
+              (
+                (search_all.updates | default([]))
+                +
+                (search_all.filtered_updates | default({}) | dict2items | map(attribute='value') | list)
+              )
+              | map(attribute='title') | list
+            }}
+      when: (search_all.updates | default([]) | length) > 0
+            or (search_all.filtered_updates | default({}) | length) > 0
+
 
     # 1) SSU primero
     - name: Instalar únicamente Servicing Stack Updates
