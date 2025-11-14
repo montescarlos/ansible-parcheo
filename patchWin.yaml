@@ -27,7 +27,7 @@
     - name: Esperar WinRM arriba
       ansible.builtin.wait_for_connection:
         delay: 15
-        timeout: 600
+        timeout: 0
 
     - name: Comprobación final
       ansible.windows.win_ping:
