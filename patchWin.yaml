@@ -13,31 +13,28 @@
       ansible.windows.win_updates:
         state: searched
       register: search_all
+    - name: Normalizar estructuras devueltas por win_updates
+    ansible.builtin.set_fact:
+      updates_norm: >-
+        {{
+          (search_all.updates is mapping)
+          | ternary(
+              search_all.updates | dict2items | map(attribute='value') | list,
+              (search_all.updates | default([]) | list)
+            )
+        }}
+      filtered_norm: >-
+        {{
+          search_all.filtered_updates | default({}) | dict2items | map(attribute='value') | list
+        }}
 
-    - name: Mostrar lista encontrada (KBs/títulos) sin romper si no hay nada
+    - name: Mostrar lista encontrada (KBs/títulos) segura
       ansible.builtin.debug:
         msg:
-          kbs: >-
-            {{
-              (
-                (search_all.updates | default([]))
-                +
-                (search_all.filtered_updates | default({}) | dict2items | map(attribute='value') | list)
-              )
-              | map(attribute='kb') | map('first') | list
-            }}
-          titles: >-
-            {{
-              (
-                (search_all.updates | default([]))
-                +
-                (search_all.filtered_updates | default({}) | dict2items | map(attribute='value') | list)
-              )
-              | map(attribute='title') | list
-            }}
-      when: (search_all.updates | default([]) | length) > 0
-            or (search_all.filtered_updates | default({}) | length) > 0
-
+          kbs: "{{ (updates_norm + filtered_norm) | map(attribute='kb') | map('first') | list | default([]) }}"
+          titles: "{{ (updates_norm + filtered_norm) | map(attribute='title') | list | default([]) }}"
+      when: (updates_norm | length + filtered_norm | length) > 0
+    
 
     # 1) SSU primero
     - name: Instalar únicamente Servicing Stack Updates
