@@ -13,20 +13,21 @@
       ansible.windows.win_updates:
         state: searched
       register: search_all
+    
     - name: Normalizar estructuras devueltas por win_updates
-    ansible.builtin.set_fact:
-      updates_norm: >-
-        {{
-          (search_all.updates is mapping)
-          | ternary(
-              search_all.updates | dict2items | map(attribute='value') | list,
-              (search_all.updates | default([]) | list)
-            )
-        }}
-      filtered_norm: >-
-        {{
-          search_all.filtered_updates | default({}) | dict2items | map(attribute='value') | list
-        }}
+      ansible.builtin.set_fact:
+        updates_norm: >-
+          {{
+            (search_all.updates is mapping)
+            | ternary(
+                search_all.updates | dict2items | map(attribute='value') | list,
+                (search_all.updates | default([]) | list)
+              )
+          }}
+        filtered_norm: >-
+          {{
+            search_all.filtered_updates | default({}) | dict2items | map(attribute='value') | list
+          }}
 
     - name: Mostrar lista encontrada (KBs/títulos) segura
       ansible.builtin.debug:
