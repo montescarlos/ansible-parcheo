@@ -6,7 +6,6 @@
   vars:
     log_path: "C:\\Windows\\Temp\\ansible-winupdates.log"
     reject_kbs:
-      - KB5078766
     min_free_gb_c: 10
     patch_categories:
       - CriticalUpdates
