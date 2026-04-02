@@ -7,6 +7,8 @@
     log_path: "C:\\Windows\\Temp\\ansible-winupdates.log"
     reject_kbs:
     min_free_gb_c: 10
+    winhttp_proxy: ""
+    winhttp_proxy_bypass: ""
     patch_categories:
       - CriticalUpdates
       - SecurityUpdates
@@ -76,6 +78,43 @@
       when: (wuauserv_status_after.state | default('')) != 'running'
       tags:
         - precheck
+
+    - name: Mostrar proxy WinHTTP actual
+      ansible.windows.win_command: netsh winhttp show proxy
+      register: winhttp_proxy_current
+      changed_when: false
+      tags:
+        - precheck
+        - proxy
+
+    - name: Configurar proxy WinHTTP si fue definido
+      ansible.windows.win_command: >-
+        netsh winhttp set proxy {{ winhttp_proxy }}
+        {% if (winhttp_proxy_bypass | default('') | trim) != '' %}
+        bypass-list={{ winhttp_proxy_bypass }}
+        {% endif %}
+      when: (winhttp_proxy | default('') | trim) != ''
+      register: winhttp_proxy_set
+      changed_when: true
+      tags:
+        - precheck
+        - proxy
+
+    - name: Informar que no se definió proxy WinHTTP y se usará salida actual
+      ansible.builtin.debug:
+        msg: "No se definió winhttp_proxy. No se modifica la configuración WinHTTP actual."
+      when: (winhttp_proxy | default('') | trim) == ''
+      tags:
+        - precheck
+        - proxy
+
+    - name: Mostrar proxy WinHTTP resultante
+      ansible.windows.win_command: netsh winhttp show proxy
+      register: winhttp_proxy_after
+      changed_when: false
+      tags:
+        - precheck
+        - proxy
 
     - name: Buscar actualizaciones iniciales
       ansible.windows.win_updates:
@@ -329,6 +368,7 @@
           reboot_durante_proceso: "{{ reboot_required_any }}"
           reject_kbs_aplicadas: "{{ reject_kbs }}"
           log_path: "{{ log_path }}"
+          winhttp_proxy_actual: "{{ winhttp_proxy_after.stdout | default('N/A') }}"
       tags:
         - report
 
