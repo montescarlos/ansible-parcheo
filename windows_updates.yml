@@ -1,13 +1,14 @@
 ---
-- name: Parchar Windows Server con prechecks, olas y reporte
+- name: Parchar Windows Server con prechecks, instalación y reporte global
   hosts: all
   gather_facts: no
 
   vars:
     log_path: "C:\\Windows\\Temp\\ansible-winupdates.log"
-    reject_kbs: []                  # Ejemplo: ["KB5036893","KB5034763"]
-    min_free_gb_c: 10               # Ajustar según política
-    max_update_waves: 5             # Número máximo de olas
+    reject_kbs:
+    min_free_gb_c: 10
+    winhttp_proxy: ""
+    winhttp_proxy_bypass: ""
     patch_categories:
       - CriticalUpdates
       - SecurityUpdates
@@ -21,6 +22,9 @@
         reboot_required_any: false
         remaining_updates_norm: []
         updates_initial_norm: []
+        host_has_pending_updates: false
+        host_fully_updated: false
+        remaining_updates_not_rejected: []
       tags:
         - always
 
@@ -68,35 +72,53 @@
 
     - name: Fallar si Windows Update no pudo iniciarse
       ansible.builtin.fail:
-        msg: "El servicio Windows Update (wuauserv) no pudo quedar en Running. Estado actual: {{ wuauserv_status_after.state | default('desconocido') }}"
+        msg: >-
+          El servicio Windows Update (wuauserv) no pudo quedar en Running.
+          Estado actual: {{ wuauserv_status_after.state | default('desconocido') }}
       when: (wuauserv_status_after.state | default('')) != 'running'
       tags:
         - precheck
 
-#    - name: Verificar reboot pendiente antes de iniciar
-#      ansible.windows.win_pending_reboot:
-#      register: pending_reboot_before
-#      tags:
-#        - precheck
+    - name: Mostrar proxy WinHTTP actual
+      ansible.windows.win_command: netsh winhttp show proxy
+      register: winhttp_proxy_current
+      changed_when: false
+      tags:
+        - precheck
+        - proxy
 
-#    - name: Reiniciar si había reboot pendiente previo
-#      ansible.windows.win_reboot:
-#        reboot_timeout: 3600
-#        post_reboot_delay: 30
-#      when: pending_reboot_before.reboot_required | default(false)
-#      tags:
-#        - precheck
+    - name: Configurar proxy WinHTTP si fue definido
+      ansible.windows.win_command: >-
+        netsh winhttp set proxy {{ winhttp_proxy }}
+        {% if (winhttp_proxy_bypass | default('') | trim) != '' %}
+        bypass-list={{ winhttp_proxy_bypass }}
+        {% endif %}
+      when: (winhttp_proxy | default('') | trim) != ''
+      register: winhttp_proxy_set
+      changed_when: true
+      tags:
+        - precheck
+        - proxy
 
-#    - name: Esperar WinRM tras reboot previo
-#      ansible.builtin.wait_for_connection:
-#        delay: 15
-#        timeout: 1200
-#      when: pending_reboot_before.reboot_required | default(false)
-#      tags:
-#        - precheck
+    - name: Informar que no se definió proxy WinHTTP y se usará salida actual
+      ansible.builtin.debug:
+        msg: "No se definió winhttp_proxy. No se modifica la configuración WinHTTP actual."
+      when: (winhttp_proxy | default('') | trim) == ''
+      tags:
+        - precheck
+        - proxy
+
+    - name: Mostrar proxy WinHTTP resultante
+      ansible.windows.win_command: netsh winhttp show proxy
+      register: winhttp_proxy_after
+      changed_when: false
+      tags:
+        - precheck
+        - proxy
 
     - name: Buscar actualizaciones iniciales
       ansible.windows.win_updates:
+        category_names: "{{ patch_categories }}"
         state: searched
       register: search_initial
       tags:
@@ -130,7 +152,7 @@
         msg:
           total_detectadas: "{{ updates_initial_norm | length }}"
           titulos: "{{ updates_initial_norm | selectattr('title', 'defined') | map(attribute='title') | list }}"
-          kbs: "{{ updates_initial_norm | selectattr('kb', 'defined') | map(attribute='kb') | list }}"
+          kbs: "{{ updates_initial_norm | selectattr('kb', 'defined') | map(attribute='kb') | flatten | list }}"
       tags:
         - precheck
         - report
@@ -154,49 +176,288 @@
       tags:
         - patch
 
-    # Revisar si el job del cliente necesita más de 5 olas.
-    - name: Ejecutar olas de parcheo
-      ansible.builtin.include_tasks: wave_updates.yml
-      loop: "{{ range(1, (max_update_waves | int) + 1) | list }}"
-      loop_control:
-        loop_var: wave_no
+    - name: Instalar updates principales
+      block:
+        - name: Instalar actualizaciones críticas/seguridad/rollups
+          ansible.windows.win_updates:
+            category_names: "{{ patch_categories }}"
+            state: installed
+            reboot: yes
+            reboot_timeout: 3600
+            log_path: "{{ log_path }}"
+            reject_list: "{{ reject_kbs }}"
+          register: patch_result
+
+        - name: Esperar WinRM tras instalación principal
+          ansible.builtin.wait_for_connection:
+            delay: 15
+            timeout: 1200
+
+        - name: Normalizar updates procesadas
+          ansible.builtin.set_fact:
+            patch_result_norm: >-
+              {{
+                (patch_result.updates is mapping)
+                | ternary(
+                    patch_result.updates | dict2items | map(attribute='value') | list,
+                    patch_result.updates | default([]) | list
+                  )
+              }}
+
+        - name: Acumular títulos realmente instalados
+          ansible.builtin.set_fact:
+            installed_titles_all: >-
+              {{
+                installed_titles_all
+                +
+                (
+                  patch_result_norm
+                  | selectattr('installed', 'defined')
+                  | selectattr('installed')
+                  | selectattr('title', 'defined')
+                  | map(attribute='title')
+                  | list
+                )
+              }}
+
+        - name: Acumular KBs fallidas
+          ansible.builtin.set_fact:
+            failed_kbs_all: >-
+              {{
+                failed_kbs_all
+                +
+                (
+                  patch_result_norm
+                  | selectattr('failure_hresult_code', 'defined')
+                  | selectattr('kb', 'defined')
+                  | map(attribute='kb')
+                  | flatten
+                  | list
+                )
+              }}
+
+        - name: Acumular si hubo reboot
+          ansible.builtin.set_fact:
+            reboot_required_any: "{{ reboot_required_any or (patch_result.rebooted | default(false)) or (patch_result.reboot_required | default(false)) }}"
+
+      rescue:
+        - name: Mostrar error capturado de instalación
+          ansible.builtin.debug:
+            var: ansible_failed_result
+
+        - name: Acumular KBs fallidas capturadas en rescue
+          ansible.builtin.set_fact:
+            failed_kbs_all: >-
+              {{
+                failed_kbs_all
+                +
+                (
+                  (
+                    ansible_failed_result.updates | default({})
+                  )
+                  | dict2items
+                  | map(attribute='value')
+                  | selectattr('kb', 'defined')
+                  | map(attribute='kb')
+                  | flatten
+                  | list
+                )
+              }}
+
+        - name: Fallar controladamente por error en instalación
+          ansible.builtin.fail:
+            msg: >-
+              Error durante la instalación principal.
+              KBs afectadas: {{ failed_kbs_all | unique }}.
+              Detalle: {{ ansible_failed_result.msg | default('Sin mensaje') }}.
+              Revisar log en {{ log_path }}.
       when: (remaining_updates_norm | length) > 0
       tags:
         - patch
 
-    - name: Reporte final
+    - name: Buscar updates pendientes después de instalación
+      ansible.windows.win_updates:
+        category_names: "{{ patch_categories }}"
+        state: searched
+      register: search_after_patch
+      tags:
+        - patch
+        - report
+
+    - name: Normalizar updates pendientes finales
+      ansible.builtin.set_fact:
+        remaining_updates_norm: >-
+          {{
+            (search_after_patch.updates is mapping)
+            | ternary(
+                search_after_patch.updates | dict2items | map(attribute='value') | list,
+                search_after_patch.updates | default([]) | list
+              )
+          }}
+      tags:
+        - patch
+        - report
+
+    - name: Marcar si el host aún tiene actualizaciones pendientes
+      ansible.builtin.set_fact:
+        host_has_pending_updates: "{{ (remaining_updates_norm | length) > 0 }}"
+      tags:
+        - report
+
+    - name: Marcar si el host quedó totalmente actualizado
+      ansible.builtin.set_fact:
+        host_fully_updated: "{{ (remaining_updates_norm | length) == 0 }}"
+      tags:
+        - report
+
+    - name: Inicializar pendientes no excluidas
+      ansible.builtin.set_fact:
+        remaining_updates_not_rejected: []
+      tags:
+        - report
+
+    - name: Acumular pendientes no excluidas
+      ansible.builtin.set_fact:
+        remaining_updates_not_rejected: "{{ remaining_updates_not_rejected + [item] }}"
+      loop: "{{ remaining_updates_norm }}"
+      when: >
+        (
+          item.kb is not defined
+        ) or
+        (
+          (item.kb | flatten | intersect(reject_kbs) | length) == 0
+        )
+      tags:
+        - report
+
+    - name: Informar si ya no hay actualizaciones disponibles
+      ansible.builtin.debug:
+        msg: "No hay actualizaciones disponibles pendientes para las categorías definidas."
+      when: (remaining_updates_norm | length) == 0
+      tags:
+        - report
+
+    - name: Informar si aún quedan actualizaciones pendientes
+      ansible.builtin.debug:
+        msg: >-
+          Aún quedan {{ remaining_updates_norm | length }} actualizaciones pendientes:
+          {{
+            remaining_updates_norm
+            | selectattr('title', 'defined')
+            | map(attribute='title')
+            | list
+          }}
+      when: (remaining_updates_norm | length) > 0
+      tags:
+        - report
+
+    - name: Reporte final por host
       ansible.builtin.debug:
         msg:
           espacio_libre_c_gb: "{{ free_space_c.stdout | default('N/A') | trim }}"
-          estado_wuauserv: "{{ wuauserv_status.stdout | default('N/A') | trim }}"
-#          reboot_previo_detectado: "{{ pending_reboot_before.reboot_required | default(false) }}"
+          estado_wuauserv: "{{ wuauserv_status_after.state | default(wuauserv_status.state | default('N/A')) }}"
           reboot_previo_detectado: false
           total_detectadas_inicialmente: "{{ updates_initial_norm | length }}"
           total_instaladas_reportadas: "{{ installed_titles_all | unique | length }}"
           updates_instaladas: "{{ installed_titles_all | unique }}"
           failed_kbs: "{{ failed_kbs_all | unique }}"
           updates_pendientes_finales: "{{ remaining_updates_norm | length }}"
+          updates_pendientes_no_excluidas: "{{ remaining_updates_not_rejected | length }}"
           titulos_pendientes_finales: "{{ remaining_updates_norm | selectattr('title', 'defined') | map(attribute='title') | list }}"
+          titulos_pendientes_no_excluidos: "{{ remaining_updates_not_rejected | selectattr('title', 'defined') | map(attribute='title') | list }}"
           reboot_durante_proceso: "{{ reboot_required_any }}"
           reject_kbs_aplicadas: "{{ reject_kbs }}"
           log_path: "{{ log_path }}"
+          winhttp_proxy_actual: "{{ winhttp_proxy_after.stdout | default('N/A') }}"
       tags:
         - report
 
-    - name: Fallar si quedaron updates pendientes tras el máximo de olas
+    - name: Construir informe global de hosts con actualizaciones pendientes
+      ansible.builtin.set_fact:
+        hosts_with_pending_updates_report: >-
+          {%- set ns = namespace(items=[]) -%}
+          {%- for h in ansible_play_hosts_all -%}
+            {%- if hostvars[h].host_has_pending_updates | default(false) -%}
+              {%- set _ = ns.items.append({
+                    'host': h,
+                    'count': (hostvars[h].remaining_updates_norm | default([]) | length),
+                    'count_not_rejected': (hostvars[h].remaining_updates_not_rejected | default([]) | length),
+                    'titles': (
+                      hostvars[h].remaining_updates_norm
+                      | default([])
+                      | selectattr('title', 'defined')
+                      | map(attribute='title')
+                      | list
+                    ),
+                    'titles_not_rejected': (
+                      hostvars[h].remaining_updates_not_rejected
+                      | default([])
+                      | selectattr('title', 'defined')
+                      | map(attribute='title')
+                      | list
+                    )
+                  }) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ ns.items }}
+      run_once: true
+      delegate_to: localhost
+      tags:
+        - report
+
+    - name: Construir informe global de hosts totalmente actualizados
+      ansible.builtin.set_fact:
+        hosts_fully_updated_report: >-
+          {%- set ns = namespace(items=[]) -%}
+          {%- for h in ansible_play_hosts_all -%}
+            {%- if hostvars[h].host_fully_updated | default(false) -%}
+              {%- set _ = ns.items.append({
+                    'host': h,
+                    'installed_count': (hostvars[h].installed_titles_all | default([]) | unique | length),
+                    'installed_titles': (hostvars[h].installed_titles_all | default([]) | unique | list)
+                  }) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ ns.items }}
+      run_once: true
+      delegate_to: localhost
+      tags:
+        - report
+
+    - name: Mostrar informe global de hosts con actualizaciones pendientes
+      ansible.builtin.debug:
+        msg:
+          total_hosts_con_pendientes: "{{ hosts_with_pending_updates_report | length }}"
+          hosts_con_pendientes: "{{ hosts_with_pending_updates_report }}"
+      run_once: true
+      delegate_to: localhost
+      tags:
+        - report
+
+    - name: Mostrar informe global de hosts totalmente actualizados
+      ansible.builtin.debug:
+        msg:
+          total_hosts_totalmente_actualizados: "{{ hosts_fully_updated_report | length }}"
+          hosts_totalmente_actualizados: "{{ hosts_fully_updated_report }}"
+      run_once: true
+      delegate_to: localhost
+      tags:
+        - report
+
+    - name: Fallar si quedaron updates pendientes no excluidas
       ansible.builtin.fail:
         msg: >-
-          Quedaron {{ remaining_updates_norm | length }} actualizaciones pendientes
-          después de {{ max_update_waves }} olas.
+          Quedaron {{ remaining_updates_not_rejected | length }} actualizaciones pendientes no excluidas.
           Pendientes: {{
-            remaining_updates_norm
+            remaining_updates_not_rejected
             | selectattr('title', 'defined')
             | map(attribute='title')
             | list
           }}.
           Revisar log en {{ log_path }}.
       when:
-        - (remaining_updates_norm | length) > 0
+        - (remaining_updates_not_rejected | length) > 0
+        - (failed_kbs_all | unique | length) == 0
       tags:
         - report
 
