@@ -1,0 +1,116 @@
+---
+- name: Buscar updates pendientes antes de la ola {{ wave_no }}
+  ansible.windows.win_updates:
+    category_names: "{{ patch_categories }}"
+    state: searched
+  register: search_wave
+
+- name: Normalizar updates pendientes antes de la ola {{ wave_no }}
+  ansible.builtin.set_fact:
+    updates_wave_norm: >-
+      {{
+        (search_wave.updates is mapping)
+        | ternary(
+            search_wave.updates | dict2items | map(attribute='value') | list,
+            search_wave.updates | default([]) | list
+          )
+      }}
+
+- name: Mostrar resumen previo de la ola {{ wave_no }}
+  ansible.builtin.debug:
+    msg:
+      wave: "{{ wave_no }}"
+      total_pendientes: "{{ updates_wave_norm | length }}"
+      titulos: "{{ updates_wave_norm | selectattr('title', 'defined') | map(attribute='title') | list }}"
+
+- name: Instalar updates de la ola {{ wave_no }}
+  ansible.windows.win_updates:
+    category_names: "{{ patch_categories }}"
+    state: installed
+    reboot: yes
+    reboot_timeout: 3600
+    log_path: "{{ log_path }}"
+    reject_list: "{{ reject_kbs }}"
+  register: wave_install
+  when: (updates_wave_norm | length) > 0
+
+- name: Esperar WinRM tras la ola {{ wave_no }}
+  ansible.builtin.wait_for_connection:
+    delay: 15
+    timeout: 1200
+  when: (updates_wave_norm | length) > 0
+
+- name: Normalizar updates procesadas en la ola {{ wave_no }}
+  ansible.builtin.set_fact:
+    wave_install_norm: >-
+      {{
+        (wave_install.updates is mapping)
+        | ternary(
+            wave_install.updates | dict2items | map(attribute='value') | list,
+            wave_install.updates | default([]) | list
+          )
+      }}
+  when: (updates_wave_norm | length) > 0
+
+- name: Acumular títulos instalados de la ola {{ wave_no }}
+  ansible.builtin.set_fact:
+    installed_titles_all: >-
+      {{
+        installed_titles_all
+        +
+        (
+          wave_install_norm
+          | selectattr('title', 'defined')
+          | map(attribute='title')
+          | list
+        )
+      }}
+  when: (updates_wave_norm | length) > 0
+
+- name: Acumular KBs fallidas de la ola {{ wave_no }}
+  ansible.builtin.set_fact:
+    failed_kbs_all: >-
+      {{
+        failed_kbs_all
+        +
+        (
+          wave_install_norm
+          | selectattr('failure_hresult_code', 'defined')
+          | selectattr('kb', 'defined')
+          | map(attribute='kb')
+          | list
+        )
+      }}
+  when: (updates_wave_norm | length) > 0
+
+- name: Acumular si hubo reboot en la ola {{ wave_no }}
+  ansible.builtin.set_fact:
+    reboot_required_any: "{{ reboot_required_any or (wave_install.reboot_required | default(false)) }}"
+  when: (updates_wave_norm | length) > 0
+
+- name: Buscar updates pendientes después de la ola {{ wave_no }}
+  ansible.windows.win_updates:
+    category_names: "{{ patch_categories }}"
+    state: searched
+  register: search_after_wave
+
+- name: Normalizar updates pendientes después de la ola {{ wave_no }}
+  ansible.builtin.set_fact:
+    remaining_updates_norm: >-
+      {{
+        (search_after_wave.updates is mapping)
+        | ternary(
+            search_after_wave.updates | dict2items | map(attribute='value') | list,
+            search_after_wave.updates | default([]) | list
+          )
+      }}
+
+- name: Mostrar resultado de la ola {{ wave_no }}
+  ansible.builtin.debug:
+    msg:
+      wave: "{{ wave_no }}"
+      pendientes_despues: "{{ remaining_updates_norm | length }}"
+      failed_kbs_acumuladas: "{{ failed_kbs_all | unique }}"
+
+# Revisar si quieres abortar temprano cuando failed_kbs_all tenga contenido.
+# Así como está, el playbook completa el ciclo y reporta al final.
