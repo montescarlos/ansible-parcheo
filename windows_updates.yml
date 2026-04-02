@@ -1,0 +1,212 @@
+---
+- name: Parchar Windows Server con prechecks, olas y reporte
+  hosts: all
+  gather_facts: no
+
+  vars:
+    log_path: "C:\\Windows\\Temp\\ansible-winupdates.log"
+    reject_kbs: []                  # Ejemplo: ["KB5036893","KB5034763"]
+    min_free_gb_c: 10               # Ajustar según política
+    max_update_waves: 5             # Número máximo de olas
+    patch_categories:
+      - CriticalUpdates
+      - SecurityUpdates
+      - UpdateRollups
+
+  tasks:
+    - name: Inicializar acumuladores globales
+      ansible.builtin.set_fact:
+        installed_titles_all: []
+        failed_kbs_all: []
+        reboot_required_any: false
+        remaining_updates_norm: []
+        updates_initial_norm: []
+      tags:
+        - always
+
+    - name: Verificar espacio libre en C
+      ansible.windows.win_shell: |
+        $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+        [math]::Round($disk.FreeSpace / 1GB, 2)
+      register: free_space_c
+      changed_when: false
+      tags:
+        - precheck
+
+    - name: Fallar si no hay espacio suficiente en C
+      ansible.builtin.fail:
+        msg: >-
+          Espacio insuficiente en C:. Libre={{ free_space_c.stdout | trim }} GB.
+          Mínimo requerido={{ min_free_gb_c }} GB.
+      when: (free_space_c.stdout | trim | replace(',', '.') | float) < min_free_gb_c
+      tags:
+        - precheck
+
+    - name: Verificar estado del servicio Windows Update
+      ansible.windows.win_service:
+        name: wuauserv
+      register: wuauserv_status
+      changed_when: false
+      tags:
+        - precheck
+
+    - name: Iniciar servicio Windows Update si está detenido
+      ansible.windows.win_service:
+        name: wuauserv
+        state: started
+      when: (wuauserv_status.state | default('')) != 'running'
+      tags:
+        - precheck
+
+    - name: Verificar nuevamente estado del servicio Windows Update
+      ansible.windows.win_service:
+        name: wuauserv
+      register: wuauserv_status_after
+      changed_when: false
+      tags:
+        - precheck
+
+    - name: Fallar si Windows Update no pudo iniciarse
+      ansible.builtin.fail:
+        msg: "El servicio Windows Update (wuauserv) no pudo quedar en Running. Estado actual: {{ wuauserv_status_after.state | default('desconocido') }}"
+      when: (wuauserv_status_after.state | default('')) != 'running'
+      tags:
+        - precheck
+
+#    - name: Verificar reboot pendiente antes de iniciar
+#      ansible.windows.win_pending_reboot:
+#      register: pending_reboot_before
+#      tags:
+#        - precheck
+
+#    - name: Reiniciar si había reboot pendiente previo
+#      ansible.windows.win_reboot:
+#        reboot_timeout: 3600
+#        post_reboot_delay: 30
+#      when: pending_reboot_before.reboot_required | default(false)
+#      tags:
+#        - precheck
+
+#    - name: Esperar WinRM tras reboot previo
+#      ansible.builtin.wait_for_connection:
+#        delay: 15
+#        timeout: 1200
+#      when: pending_reboot_before.reboot_required | default(false)
+#      tags:
+#        - precheck
+
+    - name: Buscar actualizaciones iniciales
+      ansible.windows.win_updates:
+        state: searched
+      register: search_initial
+      tags:
+        - precheck
+        - report
+
+    - name: Normalizar actualizaciones iniciales
+      ansible.builtin.set_fact:
+        updates_initial_norm: >-
+          {{
+            (search_initial.updates is mapping)
+            | ternary(
+                search_initial.updates | dict2items | map(attribute='value') | list,
+                search_initial.updates | default([]) | list
+              )
+          }}
+        remaining_updates_norm: >-
+          {{
+            (search_initial.updates is mapping)
+            | ternary(
+                search_initial.updates | dict2items | map(attribute='value') | list,
+                search_initial.updates | default([]) | list
+              )
+          }}
+      tags:
+        - precheck
+        - report
+
+    - name: Mostrar inventario inicial
+      ansible.builtin.debug:
+        msg:
+          total_detectadas: "{{ updates_initial_norm | length }}"
+          titulos: "{{ updates_initial_norm | selectattr('title', 'defined') | map(attribute='title') | list }}"
+          kbs: "{{ updates_initial_norm | selectattr('kb', 'defined') | map(attribute='kb') | list }}"
+      tags:
+        - precheck
+        - report
+
+    - name: Instalar únicamente Servicing Stack Updates
+      ansible.windows.win_updates:
+        category_names:
+          - ServicingStackUpdates
+        state: installed
+        reboot: yes
+        reboot_timeout: 3600
+        log_path: "{{ log_path }}"
+      register: ssu_result
+      tags:
+        - patch
+
+    - name: Esperar WinRM tras SSU
+      ansible.builtin.wait_for_connection:
+        delay: 15
+        timeout: 1200
+      tags:
+        - patch
+
+    # Revisar si el job del cliente necesita más de 5 olas.
+    - name: Ejecutar olas de parcheo
+      ansible.builtin.include_tasks: wave_updates.yml
+      loop: "{{ range(1, (max_update_waves | int) + 1) | list }}"
+      loop_control:
+        loop_var: wave_no
+      when: (remaining_updates_norm | length) > 0
+      tags:
+        - patch
+
+    - name: Reporte final
+      ansible.builtin.debug:
+        msg:
+          espacio_libre_c_gb: "{{ free_space_c.stdout | default('N/A') | trim }}"
+          estado_wuauserv: "{{ wuauserv_status.stdout | default('N/A') | trim }}"
+#          reboot_previo_detectado: "{{ pending_reboot_before.reboot_required | default(false) }}"
+          reboot_previo_detectado: false
+          total_detectadas_inicialmente: "{{ updates_initial_norm | length }}"
+          total_instaladas_reportadas: "{{ installed_titles_all | unique | length }}"
+          updates_instaladas: "{{ installed_titles_all | unique }}"
+          failed_kbs: "{{ failed_kbs_all | unique }}"
+          updates_pendientes_finales: "{{ remaining_updates_norm | length }}"
+          titulos_pendientes_finales: "{{ remaining_updates_norm | selectattr('title', 'defined') | map(attribute='title') | list }}"
+          reboot_durante_proceso: "{{ reboot_required_any }}"
+          reject_kbs_aplicadas: "{{ reject_kbs }}"
+          log_path: "{{ log_path }}"
+      tags:
+        - report
+
+    - name: Fallar si quedaron updates pendientes tras el máximo de olas
+      ansible.builtin.fail:
+        msg: >-
+          Quedaron {{ remaining_updates_norm | length }} actualizaciones pendientes
+          después de {{ max_update_waves }} olas.
+          Pendientes: {{
+            remaining_updates_norm
+            | selectattr('title', 'defined')
+            | map(attribute='title')
+            | list
+          }}.
+          Revisar log en {{ log_path }}.
+      when:
+        - (remaining_updates_norm | length) > 0
+      tags:
+        - report
+
+    - name: Fallar si hubo KBs con error
+      ansible.builtin.fail:
+        msg: >-
+          Se detectaron KBs con error: {{ failed_kbs_all | unique }}.
+          Puede excluirlas temporalmente en reject_kbs y reintentar.
+          Revisar log en {{ log_path }}.
+      when:
+        - (failed_kbs_all | unique | length) > 0
+      tags:
+        - report
