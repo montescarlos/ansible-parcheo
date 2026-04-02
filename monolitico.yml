@@ -23,6 +23,7 @@
         updates_initial_norm: []
         host_has_pending_updates: false
         host_fully_updated: false
+        remaining_updates_not_rejected: []
       tags:
         - always
 
@@ -271,6 +272,26 @@
       tags:
         - report
 
+    - name: Inicializar pendientes no excluidas
+      ansible.builtin.set_fact:
+        remaining_updates_not_rejected: []
+      tags:
+        - report
+
+    - name: Acumular pendientes no excluidas
+      ansible.builtin.set_fact:
+        remaining_updates_not_rejected: "{{ remaining_updates_not_rejected + [item] }}"
+      loop: "{{ remaining_updates_norm }}"
+      when: >
+        (
+          item.kb is not defined
+        ) or
+        (
+          (item.kb | flatten | intersect(reject_kbs) | length) == 0
+        )
+      tags:
+        - report
+
     - name: Informar si ya no hay actualizaciones disponibles
       ansible.builtin.debug:
         msg: "No hay actualizaciones disponibles pendientes para las categorías definidas."
@@ -303,7 +324,9 @@
           updates_instaladas: "{{ installed_titles_all | unique }}"
           failed_kbs: "{{ failed_kbs_all | unique }}"
           updates_pendientes_finales: "{{ remaining_updates_norm | length }}"
+          updates_pendientes_no_excluidas: "{{ remaining_updates_not_rejected | length }}"
           titulos_pendientes_finales: "{{ remaining_updates_norm | selectattr('title', 'defined') | map(attribute='title') | list }}"
+          titulos_pendientes_no_excluidos: "{{ remaining_updates_not_rejected | selectattr('title', 'defined') | map(attribute='title') | list }}"
           reboot_durante_proceso: "{{ reboot_required_any }}"
           reject_kbs_aplicadas: "{{ reject_kbs }}"
           log_path: "{{ log_path }}"
@@ -319,8 +342,16 @@
               {%- set _ = ns.items.append({
                     'host': h,
                     'count': (hostvars[h].remaining_updates_norm | default([]) | length),
+                    'count_not_rejected': (hostvars[h].remaining_updates_not_rejected | default([]) | length),
                     'titles': (
                       hostvars[h].remaining_updates_norm
+                      | default([])
+                      | selectattr('title', 'defined')
+                      | map(attribute='title')
+                      | list
+                    ),
+                    'titles_not_rejected': (
+                      hostvars[h].remaining_updates_not_rejected
                       | default([])
                       | selectattr('title', 'defined')
                       | map(attribute='title')
@@ -374,19 +405,19 @@
       tags:
         - report
 
-    - name: Fallar si quedaron updates pendientes
+    - name: Fallar si quedaron updates pendientes no excluidas
       ansible.builtin.fail:
         msg: >-
-          Quedaron {{ remaining_updates_norm | length }} actualizaciones pendientes.
+          Quedaron {{ remaining_updates_not_rejected | length }} actualizaciones pendientes no excluidas.
           Pendientes: {{
-            remaining_updates_norm
+            remaining_updates_not_rejected
             | selectattr('title', 'defined')
             | map(attribute='title')
             | list
           }}.
           Revisar log en {{ log_path }}.
       when:
-        - (remaining_updates_norm | length) > 0
+        - (remaining_updates_not_rejected | length) > 0
         - (failed_kbs_all | unique | length) == 0
       tags:
         - report
