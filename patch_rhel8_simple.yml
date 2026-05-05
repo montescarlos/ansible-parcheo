@@ -46,6 +46,11 @@
       ansible.builtin.debug:
         var: resultado_actualizacion
 
+    - name: Instalar herramienta para validar reinicio requerido
+      ansible.builtin.dnf:
+        name: yum-utils
+        state: present
+
     - name: Verificar si se requiere reinicio
       ansible.builtin.command: needs-restarting -r
       register: reinicio_requerido
