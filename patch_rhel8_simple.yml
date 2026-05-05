@@ -3,6 +3,8 @@
   hosts: all
   become: true
   gather_facts: true
+  vars:
+    reboot_if_required: false
 
   tasks:
 
@@ -62,6 +64,38 @@
         msg: >-
           {% if reinicio_requerido.rc == 1 %}
           El servidor requiere reinicio después de la actualización.
+          {% else %}
+          El servidor no requiere reinicio.
+          {% endif %}
+    
+    - name: Reiniciar el servidor si es requerido y autorizado
+      ansible.builtin.reboot:
+        msg: "Reinicio automático ejecutado por AWX después de aplicar actualizaciones."
+        reboot_timeout: 900
+        connect_timeout: 30
+        pre_reboot_delay: 10
+        post_reboot_delay: 30
+        test_command: whoami
+      when:
+        - reinicio_requerido.rc == 1
+        - reboot_if_required | bool
+
+    - name: Obtener kernel después del reinicio o validación final
+      ansible.builtin.command: uname -r
+      register: kernel_despues
+      changed_when: false
+
+    - name: Mostrar kernel final activo
+      ansible.builtin.debug:
+        msg: "Kernel activo al finalizar el playbook: {{ kernel_despues.stdout }}"
+
+    - name: Mostrar resumen final del reinicio
+      ansible.builtin.debug:
+        msg: >-
+          {% if reinicio_requerido.rc == 1 and reboot_if_required | bool %}
+          El servidor requería reinicio y fue reiniciado automáticamente.
+          {% elif reinicio_requerido.rc == 1 and not reboot_if_required | bool %}
+          El servidor requiere reinicio, pero no fue reiniciado porque reboot_if_required=false.
           {% else %}
           El servidor no requiere reinicio.
           {% endif %}
