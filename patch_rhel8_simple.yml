@@ -1,0 +1,62 @@
+---
+- name: Actualización básica de parches en RHEL 8
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+
+    - name: Validar conectividad con el host
+      ansible.builtin.ping:
+
+    - name: Mostrar versión del sistema operativo
+      ansible.builtin.debug:
+        msg: "Sistema operativo detectado: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+
+    - name: Mostrar kernel actual antes de actualizar
+      ansible.builtin.command: uname -r
+      register: kernel_actual
+      changed_when: false
+
+    - name: Mostrar kernel actual
+      ansible.builtin.debug:
+        msg: "Kernel actual antes de actualizar: {{ kernel_actual.stdout }}"
+
+    - name: Limpiar caché de DNF
+      ansible.builtin.command: dnf clean all
+      changed_when: false
+
+    - name: Consultar actualizaciones disponibles
+      ansible.builtin.command: dnf check-update
+      register: actualizaciones_disponibles
+      changed_when: false
+      failed_when: actualizaciones_disponibles.rc not in [0, 100]
+
+    - name: Mostrar resumen de actualizaciones disponibles
+      ansible.builtin.debug:
+        var: actualizaciones_disponibles.stdout_lines
+
+    - name: Aplicar actualizaciones disponibles
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+      register: resultado_actualizacion
+
+    - name: Mostrar resultado de actualización
+      ansible.builtin.debug:
+        var: resultado_actualizacion
+
+    - name: Verificar si se requiere reinicio
+      ansible.builtin.command: needs-restarting -r
+      register: reinicio_requerido
+      changed_when: false
+      failed_when: reinicio_requerido.rc not in [0, 1]
+
+    - name: Mostrar estado de reinicio requerido
+      ansible.builtin.debug:
+        msg: >-
+          {% if reinicio_requerido.rc == 1 %}
+          El servidor requiere reinicio después de la actualización.
+          {% else %}
+          El servidor no requiere reinicio.
+          {% endif %}
