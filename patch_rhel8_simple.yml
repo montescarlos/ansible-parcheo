@@ -6,7 +6,30 @@
   vars:
     reboot_if_required: false
 
+    use_proxy: false
+    proxy_url: ""
+    no_proxy: "localhost,127.0.0.1,::1,192.168.110.0/24,.mos.lan"
+
+    proxy_env: >-
+      {{
+        {
+          'http_proxy': proxy_url,
+          'https_proxy': proxy_url,
+          'HTTP_PROXY': proxy_url,
+          'HTTPS_PROXY': proxy_url,
+          'no_proxy': no_proxy,
+          'NO_PROXY': no_proxy
+        } if use_proxy | bool else {}
+      }}
+
   tasks:
+    - name: Validar que proxy_url esté definido cuando use_proxy=true
+      ansible.builtin.assert:
+        that:
+          - proxy_url | length > 0
+        fail_msg: "use_proxy=true, pero proxy_url está vacío. Defina proxy_url en Extra Variables de AWX."
+        success_msg: "Proxy configurado correctamente para esta ejecución."
+      when: use_proxy | bool
 
     - name: Validar conectividad con el host
       ansible.builtin.ping:
@@ -26,10 +49,12 @@
 
     - name: Limpiar caché de DNF
       ansible.builtin.command: dnf clean all
+      environment: "{{ proxy_env }}"
       changed_when: false
 
     - name: Consultar actualizaciones disponibles
       ansible.builtin.command: dnf check-update
+      environment: "{{ proxy_env }}"
       register: actualizaciones_disponibles
       changed_when: false
       failed_when: actualizaciones_disponibles.rc not in [0, 100]
@@ -42,6 +67,7 @@
       ansible.builtin.dnf:
         name: "*"
         state: latest
+      environment: "{{ proxy_env }}"
       register: resultado_actualizacion
 
     - name: Mostrar resultado de actualización
@@ -52,6 +78,7 @@
       ansible.builtin.dnf:
         name: yum-utils
         state: present
+      environment: "{{ proxy_env }}"
 
     - name: Verificar si se requiere reinicio
       ansible.builtin.command: needs-restarting -r
