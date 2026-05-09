@@ -10,6 +10,13 @@
     proxy_url: ""
     no_proxy: "localhost,127.0.0.1,::1,192.168.110.0/24,.mos.lan"
 
+    enabled_repos:
+      - rhel-8-for-x86_64-baseos-rpms
+      - rhel-8-for-x86_64-appstream-rpms
+
+    disabled_repos:
+      - "*"
+
     proxy_env: >-
       {{
         {
@@ -53,7 +60,10 @@
       changed_when: false
 
     - name: Consultar actualizaciones disponibles
-      ansible.builtin.command: dnf check-update
+      ansible.builtin.command: >-
+        dnf check-update
+        {% for repo in disabled_repos %} --disablerepo={{ repo }}{% endfor %}
+        {% for repo in enabled_repos %} --enablerepo={{ repo }}{% endfor %}
       environment: "{{ proxy_env }}"
       register: actualizaciones_disponibles
       changed_when: false
@@ -67,6 +77,8 @@
       ansible.builtin.dnf:
         name: "*"
         state: latest
+        enablerepo: "{{ enabled_repos }}"
+        disablerepo: "{{ disabled_repos if disabled_repos | length > 0 else omit }}"
       environment: "{{ proxy_env }}"
       register: resultado_actualizacion
 
@@ -78,6 +90,8 @@
       ansible.builtin.dnf:
         name: yum-utils
         state: present
+        enablerepo: "{{ enabled_repos }}"
+        disablerepo: "{{ disabled_repos if disabled_repos | length > 0 else omit }}"
       environment: "{{ proxy_env }}"
 
     - name: Verificar si se requiere reinicio
